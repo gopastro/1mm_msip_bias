@@ -61,11 +61,57 @@ AREG = {
     'SELECT_LNA2_STAGE3_VG' : int('0000 0000 0110'.replace(' ', ''), 2),
     }
 
+dac1_drain_voltage_channel_selection = {
+    # keys are a tuple - (lna, stage)
+    # where lna goes from 1 to 3
+    # and stage goes from 1 to 3
+    # LNA 1
+    (1, 1): 0,
+    (1, 2): 1,
+    (1, 3): 2,
+    # LNA 2
+    (2, 1): 4,
+    (2, 2): 5,
+    (2, 3): 6
+    }
+
+dac1_drain_current_channel_selection = {
+    # keys are a tuple - (lna, stage)
+    # where lna goes from 1 to 3
+    # and stage goes from 1 to 3
+    # LNA 1
+    (1, 1): 8,
+    (1, 2): 9,
+    (1, 3): 10,
+    # LNA 2
+    (2, 1): 12,
+    (2, 2): 13,
+    (2, 3): 14
+    }
+
+
 # Addresses for DAC2 devices
 SIS1_VOLTAGE_ADDRESS_DAC2 = 0 << 22
 SIS2_VOLTAGE_ADDRESS_DAC2 = 1 << 22
 MAGNET1_CURRENT_ADDRESS_DAC2 = 2 << 22
 MAGNET2_CURRENT_ADDRESS_DAC2 = 3 << 22
+
+def space_bin(num):
+    """Helper function to show a number in binary format
+    in 4 bits at a time
+    """
+    s = bin(num)
+    L = len(s)
+    diff = (L - 2) % 8
+    if diff != 0:
+        s = s[:2] + (diff+2) * '0' + s[2:]
+    if (len(s) - 2) % 8 == 0:
+        n = '0b '
+        for i in range((len(s)-8)/8):
+            n += s[2+i*8:2+(i+1)*8]
+            n += ' '
+    return n
+
 
 def testBit(int_type, offset):
     mask = 1 << offset
@@ -131,7 +177,7 @@ def get_sis_mixer_voltage(dword):
     """mV"""
     return 50.*(float(dword)/float(65536))
 
-def get_sis_mixer_current(dword, Rs=10.):
+def get_sis_mixer_current(dword, Rs=5.):
     """mA"""
     return 20.*(float(dword)/float(65536))/Rs
 
@@ -186,13 +232,53 @@ def get_magnet_current_bytes(Imag, magnet=1):
         dacaddress = MAGNET1_CURRENT_ADDRESS_DAC2
     elif magnet == 2:
         dacaddress = MAGNET2_CURRENT_ADDRESS_DAC2
-    dacaddress = setBit(dacaddress, 21)
+    dacaddress = clearBit(dacaddress, 21)
     dacnumber = (dacaddress & 0xff0000) + \
                 (set_magnet_current_word(Imag) & 0xffff)
     byte2 = (dacnumber & 0xFF0000) >> 16
     byte1 = (dacnumber & 0x00FF00) >> 8
     byte0 = (dacnumber & 0x0000FF)
     return [byte2, byte1, byte0]
+
+def get_sis_voltage_bytes(Vj, sis=1):
+    if sis == 1:
+        dacaddress = SIS1_VOLTAGE_ADDRESS_DAC2
+    elif sis == 2:
+        dacaddress = SIS2_VOLTAGE_ADDRESS_DAC2
+    dacaddress = clearBit(dacaddress, 21)
+    dacnumber = (dacaddress & 0xff0000) + \
+                (set_sis_mixer_voltage_word(Vj) & 0xffff)
+    byte2 = (dacnumber & 0xFF0000) >> 16
+    byte1 = (dacnumber & 0x00FF00) >> 8
+    byte0 = (dacnumber & 0x0000FF)
+    return [byte2, byte1, byte0]    
+
+def get_lna_drain_voltage_bytes(Vd, lna=1, stage=1):
+    channel = dac1_drain_voltage_channel_selection[(lna, stage)]
+    print channel
+    # below 3 << 14 selects 1,1 for  REG1 and REG0 which are  in bits 14 & 15
+    dacnumber = (((channel & 0xff) << 16) & 0xff0000) + \
+                 (((3 << 14) & 0xffff) + (set_lna_drain_voltage_word(Vd) & 0x3fff))
+    dacnumber = clearBit(dacnumber, 22)
+    print dacnumber
+    byte2 = (dacnumber & 0xFF0000) >> 16
+    byte1 = (dacnumber & 0x00FF00) >> 8
+    byte0 = (dacnumber & 0x0000FF)
+    return [byte2, byte1, byte0]
+
+def get_lna_drain_current_bytes(Id, lna=1, stage=1):
+    channel = dac1_drain_current_channel_selection[(lna, stage)]
+    print channel
+    # below 3 << 14 selects 1,1 for  REG1 and REG0 which are  in bits 14 & 15
+    dacnumber = (((channel & 0xff) << 16) & 0xff0000) + \
+                 (((3 << 14) & 0xffff) + (set_lna_drain_current_word(Id) & 0x3fff))
+    dacnumber = clearBit(dacnumber, 22)
+    print dacnumber
+    byte2 = (dacnumber & 0xFF0000) >> 16
+    byte1 = (dacnumber & 0x00FF00) >> 8
+    byte0 = (dacnumber & 0x0000FF)
+    return [byte2, byte1, byte0]
+
 
 def shift_bytes(bytes, shift=True):
     """
@@ -496,7 +582,9 @@ class BiasModule(object):
         self.send_command(cmd, wait_cycles=18)
 
     def hemt_led_control_on(self, polar=0):
+        print self.breg
         self.breg = breg_hemt_led_on(self.breg)
+        print self.breg
         #cmd = [cmd_by_polar(BREG_PARALLEL_WRITE, polar)]
         #cmd.append(self.breg)
         cmd = self.shift_breg_parallel_bytes(cmd_by_polar(BREG_PARALLEL_WRITE, polar),
@@ -641,9 +729,69 @@ class BiasModule(object):
 
     def get_temperature(self, sensor=1, polar=0):
         voltage = self._get_temp_sensor_voltage(sensor=sensor, polar=polar)
-        #print "Voltage: %s V" % voltage
+        print "Voltage: %s V" % voltage
         return float(interpolate.splev(voltage, self.curve10, der=0))
 
+    def set_sis_mixer_voltage(self, Vj, sis=1, polar=0):
+        bytes = get_sis_voltage_bytes(Vj, sis=sis)
+        #self.send_command([
+        cmd = [cmd_by_polar(DAC2_DATA_WRITE, polar)]
+        cmd.extend(bytes)
+        self.send_command(cmd, wait_cycles=48)
+        #ch_spi_queue_delay_cycles(self.handle, 6)
+        #self.send_command(bytes, wait_cycles=36)
+
+    def get_sis_voltage(self, sis=1, polar=0):
+        """
+        Getting the SIS junction voltage through the ADC
+        """
+        self.areg = AREG['SELECT_SIS%d_V' % sis]
+        cmd = self.shift_areg_parallel_output_bytes(cmd_by_polar(AREG_PARALLEL_WRITE, polar),
+                                                    self.areg)
+        self.send_command(cmd, wait_cycles=18, shift=False)
+        self.adc_convert_strobe(polar=polar)
+        time.sleep(0.001)
+        din = self.adc_data_read(polar=polar)
+        dword = twos_comp(decode_adc_bytes(din), 16)
+        print "DWORD: %s"  % dword
+        return get_sis_mixer_voltage(dword)
+
+    def get_sis_current(self, sis=1, polar=0):
+        """
+        Getting the SIS junction current through the ADC
+        """
+        self.areg = AREG['SELECT_SIS%d_I' % sis]
+        cmd = self.shift_areg_parallel_output_bytes(cmd_by_polar(AREG_PARALLEL_WRITE, polar),
+                                                    self.areg)
+        self.send_command(cmd, wait_cycles=18, shift=False)
+        self.adc_convert_strobe(polar=polar)
+        time.sleep(0.001)
+        din = self.adc_data_read(polar=polar)
+        dword = twos_comp(decode_adc_bytes(din), 16)
+        print "DWORD: %s"  % dword
+        return get_sis_mixer_current(dword)    
+        
+    def set_lna_drain_voltage(self, Vd, lna=1, stage=1, polar=0):
+        din = self.parallel_read(polar=polar)
+        print is_dac1_ready(din[0])
+        bytes = get_lna_drain_voltage_bytes(Vd, lna=lna, stage=stage)
+        #self.send_command([
+        cmd = [cmd_by_polar(DAC1_DATA_WRITE, polar)]
+        cmd.extend(bytes)
+        self.send_command(cmd, wait_cycles=48)
+        #ch_spi_queue_delay_cycles(self.handle, 6)
+        #self.send_command(bytes, wait_cycles=36)
+
+    def set_lna_drain_current(self, Id, lna=1, stage=1, polar=0):
+        din = self.parallel_read(polar=polar)
+        print is_dac1_ready(din[0])
+        bytes = get_lna_drain_current_bytes(Id, lna=lna, stage=stage)
+        #self.send_command([
+        cmd = [cmd_by_polar(DAC1_DATA_WRITE, polar)]
+        cmd.extend(bytes)
+        self.send_command(cmd, wait_cycles=48)
+        
+    
     def close_cheetah(self):
         ch_close(self.handle)
         
